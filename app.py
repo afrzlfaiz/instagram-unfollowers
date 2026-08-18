@@ -1,8 +1,8 @@
 """Flask web: cek followers / following / unfollowers akun Instagram.
 
 Hanya butuh sessionid (ds_user_id diambil dari prefix sessionid itu sendiri).
-Fetch followers + following via scrape_followers.fetch_iter / fetch_all, lalu unfollowers =
-following yang tidak di-follow-back (diff by pk).
+Fetch followers + following via scrape_followers.fetch_all, lalu unfollowers =
+following yang tidak di-follow-back (diff by pk). Deploy target: Render.com.
 
     python3 app.py   # http://127.0.0.1:5000
 """
@@ -11,13 +11,13 @@ import json
 import re
 import traceback
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import Request as UrlRequest
 
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
-from scrape_followers import CTX, PA_PROXY, fetch, fetch_all, fetch_iter, make_openers
+from scrape_followers import fetch, fetch_all, make_openers
 
 app = Flask(__name__)
 
@@ -40,8 +40,7 @@ def resolve_user_info(cookies: dict, username: str) -> tuple[str, dict]:
     except HTTPError as exc:
         if exc.code == 429:
             raise RuntimeError(
-                "Instagram memblokir sementara (HTTP 429/rate limit) — umum terjadi dari IP "
-                "datacenter. Tunggu beberapa menit, atau jalankan dari IP rumah/VPS pribadi."
+                "Instagram memblokir sementara (HTTP 429/rate limit) — tunggu beberapa menit lalu coba lagi."
             ) from exc
         raise RuntimeError(
             f"Resolusi username '{username}' gagal (HTTP {exc.code}) — periksa kembali sessionid atau status login akun Anda"
@@ -183,85 +182,13 @@ def ig_img():
     ):
         return jsonify({"message": "URL gambar tidak diizinkan"}), 400
 
-    last_err = None
-    for opener in make_openers():
-        try:
-            with opener.open(UrlRequest(raw, headers={"user-agent": "Mozilla/5.0"}), timeout=30) as resp:
-                data = resp.read()
-                ctype = resp.headers.get("Content-Type", "image/jpeg")
-                return Response(data, mimetype=ctype, headers={"Cache-Control": "public, max-age=86400"})
-        except (HTTPError, URLError, OSError) as exc:
-            last_err = exc
-    return jsonify({"message": str(last_err)}), 502
-
-
-@app.route("/api/scan", methods=["POST", "GET"])
-def api_scan():
-    """Endpoint Server-Sent Events (SSE) untuk live streaming progress pengambilan data."""
-    if request.method == "POST":
-        sessionid = request.form.get("sessionid", "").strip()
-        username = request.form.get("username", "").strip().lstrip("@")
-    else:
-        sessionid = request.args.get("sessionid", "").strip()
-        username = request.args.get("username", "").strip().lstrip("@")
-
-    def generate():
-        if not sessionid or not username:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Session ID dan Username wajib diisi!'})}\n\n"
-            return
-
-        try:
-            cookies = build_cookies(sessionid)
-            yield f"data: {json.dumps({'type': 'status', 'step': 'resolve', 'message': f'Mencari data akun @{username} di Instagram...' })}\n\n"
-
-            uid, target_profile = resolve_user_info(cookies, username)
-            total_following = target_profile.get("following_count", 0)
-            total_followers = target_profile.get("follower_count", 0)
-
-            yield f"data: {json.dumps({'type': 'profile_found', 'target_profile': target_profile, 'total_following': total_following, 'total_followers': total_followers, 'message': f'Akun @{username} ditemukan! Memulai pengambilan data...'})}\n\n"
-
-            # 1. Fetch Following
-            yield f"data: {json.dumps({'type': 'progress', 'phase': 'following', 'page': 1, 'current_following': 0, 'current_followers': 0, 'total_following': total_following, 'total_followers': total_followers, 'message': f'Mengambil daftar Following (Target: {total_following} akun)...'})}\n\n"
-
-            following = []
-            for page, chunk, users_so_far in fetch_iter(cookies, uid, "following", sleep=0.3):
-                following = users_so_far
-                yield f"data: {json.dumps({'type': 'progress', 'phase': 'following', 'page': page, 'chunk_size': len(chunk), 'current_following': len(following), 'current_followers': 0, 'total_following': total_following, 'total_followers': total_followers, 'message': f'Following: Halaman {page} (+{len(chunk)} user, total {len(following)})'})}\n\n"
-
-            # 2. Fetch Followers
-            yield f"data: {json.dumps({'type': 'progress', 'phase': 'followers', 'page': 1, 'current_following': len(following), 'current_followers': 0, 'total_following': total_following, 'total_followers': total_followers, 'message': f'Mengambil daftar Followers (Target: {total_followers} akun)...'})}\n\n"
-
-            followers = []
-            for page, chunk, users_so_far in fetch_iter(cookies, uid, "followers", sleep=0.3):
-                followers = users_so_far
-                yield f"data: {json.dumps({'type': 'progress', 'phase': 'followers', 'page': page, 'chunk_size': len(chunk), 'current_following': len(following), 'current_followers': len(followers), 'total_following': total_following, 'total_followers': total_followers, 'message': f'Followers: Halaman {page} (+{len(chunk)} user, total {len(followers)})'})}\n\n"
-
-            # 3. Calculate metrics
-            yield f"data: {json.dumps({'type': 'status', 'step': 'calculating', 'message': 'Menghitung perbandingan Unfollowers, Fans, dan Mutuals...'})}\n\n"
-
-            followed_pks = {str(u.get("pk") or u.get("id")) for u in followers}
-            following_pks = {str(u.get("pk") or u.get("id")) for u in following}
-
-            unfollowers = [u for u in following if str(u.get("pk") or u.get("id")) not in followed_pks]
-            fans = [u for u in followers if str(u.get("pk") or u.get("id")) not in following_pks]
-            mutuals = [u for u in following if str(u.get("pk") or u.get("id")) in followed_pks]
-
-            result = {
-                "unfollowers": unfollowers,
-                "fans": fans,
-                "mutuals": mutuals,
-                "following": following,
-                "followers": followers,
-            }
-
-            yield f"data: {json.dumps({'type': 'complete', 'result': result, 'target_profile': target_profile, 'message': f'Selesai! Ditemukan {len(unfollowers)} unfollowers, {len(fans)} fans, {len(mutuals)} mutuals.'})}\n\n"
-
-        except RuntimeError as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': f'Terjadi kesalahan: {exc}'})}\n\n"
-
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+    try:
+        with make_openers()[0].open(UrlRequest(raw, headers={"user-agent": "Mozilla/5.0"}), timeout=30) as resp:
+            data = resp.read()
+            ctype = resp.headers.get("Content-Type", "image/jpeg")
+            return Response(data, mimetype=ctype, headers={"Cache-Control": "public, max-age=86400"})
+    except (HTTPError, URLError, OSError) as exc:
+        return jsonify({"message": str(exc)}), 502
 
 
 if __name__ == "__main__":

@@ -4,6 +4,9 @@ Cookie sessionid+ds_user_id, user-agent browser, x-ig-app-id — tanpa claim.
 Followers di-cap ~24/halaman walau count minta lebih (count=50); following
 menerima count besar (count=200). Loop next_max_id sampai habis.
 
+Target deploy: Render.com (atau mac/lokal) — satu rute koneksi langsung,
+tanpa logika khusus platform.
+
 Contoh:
     python3 scrape_followers.py --user-id 30869018875 --sessionid 'xxx...'
     python3 scrape_followers.py --user-id 30869018875 --list following
@@ -14,7 +17,6 @@ Contoh:
 import argparse
 import json
 import os
-import socket
 import ssl
 import sys
 import time
@@ -26,7 +28,6 @@ from urllib.request import (
     Request as UrlRequest,
     build_opener,
     getproxies,
-    urlopen,
 )
 
 import certifi
@@ -41,30 +42,9 @@ COUNT = {"followers": 50, "following": 200}
 CTX = ssl.create_default_context(cafile=certifi.where())
 
 
-# PythonAnywhere free memaksa semua traffic keluar lewat proxy resminya
-# (proxy.server:3128) dan urllib tidak membacanya dari env. Kita coba koneksi
-# langsung/env dulu; kalau jaringan menolak (URLError), fallback ke proxy PA.
-PA_PROXY = "http://proxy.server:3128"
-
-
-def _pa_proxy_route():
-    """Route proxy PA hanya berguna di dalam jaringan PythonAnywhere —
-    hostname 'proxy.server' tidak resolve di luar (Render, mac, dll). Cek
-    sekali agar di luar PA tidak ada rute mati yang menimpa error asli."""
-    try:
-        socket.getaddrinfo("proxy.server", 3128)
-    except socket.gaierror:
-        return None
-    return {"http": PA_PROXY, "https": PA_PROXY}
-
-
 def make_openers():
-    """Rute env proxy/direct dulu; + fallback proxy PA hanya kalau resolve."""
-    routes = [build_opener(ProxyHandler(getproxies()), HTTPSHandler(context=CTX))]
-    pa = _pa_proxy_route()
-    if pa:
-        routes.append(build_opener(ProxyHandler(pa), HTTPSHandler(context=CTX)))
-    return routes
+    """Satu rute: koneksi langsung, hormati proxy env (HTTP(S)_PROXY)."""
+    return [build_opener(ProxyHandler(getproxies()), HTTPSHandler(context=CTX))]
 
 
 def _open_once(opener, url, headers, timeout=30):
@@ -72,10 +52,11 @@ def _open_once(opener, url, headers, timeout=30):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch(cookies: dict, url: str, retries: int = 4) -> dict:
-    """GET JSON dengan retry backoff untuk rate limit / error transient (429, 5xx).
-    Dua rute: env proxy/direct dulu, lalu fallback proxy PA bila jaringan menolak
-    (PythonAnywhere free memblokir koneksi langsung)."""
+def fetch(cookies: dict, url: str, retries: int = 3) -> dict:
+    """GET JSON dengan retry cepat untuk error transient (429, 5xx, reset).
+
+    Jeda sengaja pendek (2s, 4s): request harus selesai jauh di bawah
+    timeout gunicorn 30s di Render — error dilaporkan cepat, tidak hang."""
     headers = {
         "user-agent": UA,
         "accept": "*/*",
@@ -83,31 +64,20 @@ def fetch(cookies: dict, url: str, retries: int = 4) -> dict:
         "x-ig-app-id": IG_APP_ID,
         "x-requested-with": "XMLHttpRequest",
     }
-    openers = make_openers()
-
-    def attempt_routes():
-        last_err = None
-        for opener in openers:
-            try:
-                return _open_once(opener, url, headers), None
-            except HTTPError as exc:
-                last_err = exc
-                if exc.code not in (429, 500, 502, 503):
-                    return None, exc  # auth/logic error — semua rute sama
-                # 429/5xx: IP egress ini kena rate limit — coba rute lain dulu
-            except OSError as exc:
-                if not isinstance(last_err, HTTPError):
-                    last_err = exc  # jaringan menolak/reset/timeout — coba rute lain
-        return None, last_err
-
+    opener = make_openers()[0]
     for attempt in range(retries):
-        data, err = attempt_routes()
-        if data is not None:
-            return data
-        if isinstance(err, HTTPError) and err.code in (429, 500, 502, 503) and attempt < retries - 1:
-            time.sleep(5 * (3 ** attempt))  # 5, 15, 45 dtk — 429 IG butuh menit
-            continue
-        raise err
+        try:
+            return _open_once(opener, url, headers)
+        except HTTPError as exc:
+            if exc.code in (429, 500, 502, 503) and attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))  # 2s, 4s
+                continue
+            raise
+        except OSError as exc:  # reset/timeout jaringan — transient
+            if attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
 
 
 def fetch_iter(cookies: dict, user_id: str, which: str, sleep: float = 1.0,
