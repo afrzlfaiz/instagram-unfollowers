@@ -17,6 +17,7 @@ Contoh:
 import argparse
 import json
 import os
+import re
 import ssl
 import sys
 import time
@@ -40,6 +41,15 @@ IG_APP_ID = "936619743392459"
 # followers di-cap ~24/halaman; following menerima count besar
 COUNT = {"followers": 50, "following": 200}
 CTX = ssl.create_default_context(cafile=certifi.where())
+USER_ID_RE = re.compile(r"^[0-9]+$")
+
+
+def validate_user_id(user_id: str) -> str:
+    """Validate the numeric Instagram user ID used in API URL paths."""
+    value = str(user_id).strip()
+    if not USER_ID_RE.fullmatch(value):
+        raise ValueError("user ID harus berupa angka")
+    return value
 
 
 def make_openers():
@@ -57,6 +67,9 @@ def fetch(cookies: dict, url: str, retries: int = 3) -> dict:
 
     Jeda sengaja pendek (2s, 4s): request harus selesai jauh di bawah
     timeout gunicorn 30s di Render — error dilaporkan cepat, tidak hang."""
+    if retries < 1:
+        raise ValueError("retries harus minimal 1")
+
     headers = {
         "user-agent": UA,
         "accept": "*/*",
@@ -83,7 +96,17 @@ def fetch(cookies: dict, url: str, retries: int = 3) -> dict:
 def fetch_iter(cookies: dict, user_id: str, which: str, sleep: float = 1.0,
                max_pages: int = 0):
     """Generator yang yield (page, chunk, users_so_far) tiap halaman sampai habis."""
+    if which not in COUNT:
+        raise ValueError("jenis daftar harus followers atau following")
+    user_id = validate_user_id(user_id)
+    if sleep < 0:
+        raise ValueError("sleep tidak boleh negatif")
+    if max_pages < 0:
+        raise ValueError("max_pages tidak boleh negatif")
+
     users = []
+    seen_user_ids = set()
+    seen_max_ids = set()
     max_id = None
     page = 0
     while True:
@@ -104,13 +127,37 @@ def fetch_iter(cookies: dict, user_id: str, which: str, sleep: float = 1.0,
                 f"halaman {page}: HTTP {exc.code} — {exc.read().decode('utf-8', 'replace')[:200]}"
             ) from exc
 
-        chunk = data.get("users") or []
+        if not isinstance(data, dict):
+            raise RuntimeError(f"halaman {page}: respons Instagram bukan JSON object")
+
+        raw_chunk = data.get("users") or []
+        if not isinstance(raw_chunk, list):
+            raise RuntimeError(f"halaman {page}: format daftar user tidak valid")
+
+        chunk = []
+        for user in raw_chunk:
+            if not isinstance(user, dict):
+                continue
+            user_key = user.get("pk") or user.get("id")
+            if user_key is None:
+                continue
+            user_key = str(user_key)
+            if user_key in seen_user_ids:
+                continue
+            seen_user_ids.add(user_key)
+            chunk.append(user)
+
         users.extend(chunk)
         yield page, chunk, users
 
-        max_id = data.get("next_max_id")
-        if not max_id or (max_pages and page >= max_pages):
+        next_max_id = data.get("next_max_id")
+        if not next_max_id or (max_pages and page >= max_pages):
             break
+        next_max_id = str(next_max_id)
+        if next_max_id in seen_max_ids:
+            raise RuntimeError(f"halaman {page}: pagination Instagram berulang")
+        seen_max_ids.add(next_max_id)
+        max_id = next_max_id
         time.sleep(sleep)
 
 
@@ -147,7 +194,7 @@ def main():
 
     try:
         users = fetch_all(cookies, args.user_id, args.list, args.sleep, args.max_pages)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         sys.exit(f"gagal: {exc}")
 
     out = args.output or f"{args.list}_{args.user_id}.json"

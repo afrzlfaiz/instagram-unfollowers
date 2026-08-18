@@ -1,7 +1,8 @@
 # instagram-unfollow
 
 Skrip ambil semua followers/following via web API Instagram dengan auto-pagination,
-plus web app untuk cek unfollowers.
+plus web app untuk cek unfollowers. Aplikasi ini hanya membaca data dan tidak
+melakukan aksi follow/unfollow otomatis.
 
 ## Web app (Flask)
 
@@ -23,6 +24,11 @@ Fitur Web UI:
 - **Pencarian Real-Time**: Cari akun berdasarkan username / nama lengkap secara instan.
 - **Export Data**: Ekspor daftar user ke format **CSV** dan **JSON**.
 - **Fitur Praktis**: Salin @username sekali klik, tombol buka profil Instagram, fallback avatar, toggle simpan `sessionid` di browser, dan modal tutorial cara mengambil cookie `sessionid`.
+
+> **Keamanan:** `sessionid` adalah kredensial akun. Gunakan hanya pada instance
+> lokal atau server yang Anda kendalikan, jangan bagikan nilainya, dan hapus
+> dari browser setelah selesai. Jika memakai Render/server publik, cookie akan
+> dikirim ke server tersebut untuk diteruskan ke Instagram.
 
 ## CLI
 
@@ -48,6 +54,15 @@ python3 scrape_followers.py --user-id 30869018875 --sessionid 'xxx...'          
 python3 scrape_followers.py --user-id 30869018875 --list following             # following
 # atau via env:
 IG_SESSIONID='xxx...' python3 scrape_followers.py --user-id 30869018875
+```
+
+Health check web app tersedia di `GET /healthz` dan mengembalikan
+`{"status":"ok"}`.
+
+## Pengujian
+
+```bash
+python3 -m unittest discover -p 'test_*.py'
 ```
 
 ## Opsi
