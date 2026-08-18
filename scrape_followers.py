@@ -17,9 +17,16 @@ import os
 import ssl
 import sys
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request as UrlRequest, urlopen
+from urllib.request import (
+    HTTPSHandler,
+    ProxyHandler,
+    Request as UrlRequest,
+    build_opener,
+    getproxies,
+    urlopen,
+)
 
 import certifi
 
@@ -33,8 +40,21 @@ COUNT = {"followers": 50, "following": 200}
 CTX = ssl.create_default_context(cafile=certifi.where())
 
 
-def fetch(cookies: dict, url: str, retries: int = 3) -> dict:
-    """GET JSON dengan retry backoff untuk rate limit / error transient (429, 5xx)."""
+# PythonAnywhere free memaksa semua traffic keluar lewat proxy resminya
+# (proxy.server:3128) dan urllib tidak membacanya dari env. Kita coba koneksi
+# langsung/env dulu; kalau jaringan menolak (URLError), fallback ke proxy PA.
+PA_PROXY = "http://proxy.server:3128"
+
+
+def _open_once(opener, url, headers, timeout=30):
+    with opener.open(UrlRequest(url, headers=headers), timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch(cookies: dict, url: str, retries: int = 4) -> dict:
+    """GET JSON dengan retry backoff untuk rate limit / error transient (429, 5xx).
+    Dua rute: env proxy/direct dulu, lalu fallback proxy PA bila jaringan menolak
+    (PythonAnywhere free memblokir koneksi langsung)."""
     headers = {
         "user-agent": UA,
         "accept": "*/*",
@@ -42,17 +62,30 @@ def fetch(cookies: dict, url: str, retries: int = 3) -> dict:
         "x-ig-app-id": IG_APP_ID,
         "x-requested-with": "XMLHttpRequest",
     }
-    last_exc = None
+    openers = [
+        build_opener(ProxyHandler(getproxies()), HTTPSHandler(context=CTX)),
+        build_opener(ProxyHandler({"http": PA_PROXY, "https": PA_PROXY}), HTTPSHandler(context=CTX)),
+    ]
+
+    def attempt_routes():
+        last_err = None
+        for opener in openers:
+            try:
+                return _open_once(opener, url, headers), None
+            except HTTPError as exc:
+                return None, exc  # sampai ke server — rute lain tidak relevan
+            except URLError as exc:
+                last_err = exc  # network unreachable — coba rute berikutnya
+        return None, last_err
+
     for attempt in range(retries):
-        try:
-            with urlopen(UrlRequest(url, headers=headers), timeout=30, context=CTX) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except HTTPError as exc:
-            last_exc = exc
-            if exc.code not in (429, 500, 502, 503) or attempt == retries - 1:
-                raise
-            time.sleep(2 * (2 ** attempt))  # 2, 4, 8 dtk
-    raise last_exc
+        data, err = attempt_routes()
+        if data is not None:
+            return data
+        if isinstance(err, HTTPError) and err.code in (429, 500, 502, 503) and attempt < retries - 1:
+            time.sleep(5 * (3 ** attempt))  # 5, 15, 45 dtk — 429 IG butuh menit
+            continue
+        raise err
 
 
 def fetch_iter(cookies: dict, user_id: str, which: str, sleep: float = 1.0,
