@@ -33,7 +33,8 @@ COUNT = {"followers": 50, "following": 200}
 CTX = ssl.create_default_context(cafile=certifi.where())
 
 
-def fetch(cookies: dict, url: str) -> dict:
+def fetch(cookies: dict, url: str, retries: int = 3) -> dict:
+    """GET JSON dengan retry backoff untuk rate limit / error transient (429, 5xx)."""
     headers = {
         "user-agent": UA,
         "accept": "*/*",
@@ -41,8 +42,17 @@ def fetch(cookies: dict, url: str) -> dict:
         "x-ig-app-id": IG_APP_ID,
         "x-requested-with": "XMLHttpRequest",
     }
-    with urlopen(UrlRequest(url, headers=headers), timeout=30, context=CTX) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            with urlopen(UrlRequest(url, headers=headers), timeout=30, context=CTX) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            last_exc = exc
+            if exc.code not in (429, 500, 502, 503) or attempt == retries - 1:
+                raise
+            time.sleep(2 * (2 ** attempt))  # 2, 4, 8 dtk
+    raise last_exc
 
 
 def fetch_iter(cookies: dict, user_id: str, which: str, sleep: float = 1.0,
