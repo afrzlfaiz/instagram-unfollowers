@@ -27,7 +27,7 @@ def resolve_user_info(cookies: dict, username: str) -> tuple[str, dict]:
         if exc.code == 429:
             raise RuntimeError(
                 "Instagram memblokir sementara (HTTP 429/rate limit) — umum terjadi dari IP "
-                "datacenter seperti Vercel. Tunggu beberapa menit, atau jalankan dari IP rumah/VPS pribadi."
+                "datacenter. Tunggu beberapa menit, atau jalankan dari IP rumah/VPS pribadi."
             ) from exc
         raise RuntimeError(
             f"Resolusi username '{username}' gagal (HTTP {exc.code}) — periksa kembali sessionid atau status login akun Anda"
