@@ -78,7 +78,10 @@ def fetch(cookies: dict, url: str, retries: int = 4) -> dict:
             try:
                 return _open_once(opener, url, headers), None
             except HTTPError as exc:
-                return None, exc  # sampai ke server — rute lain tidak relevan
+                last_err = exc
+                if exc.code not in (429, 500, 502, 503):
+                    return None, exc  # auth/logic error — semua rute sama
+                # 429/5xx: IP egress ini kena rate limit — coba rute lain dulu
             except URLError as exc:
                 last_err = exc  # network unreachable — coba rute berikutnya
         return None, last_err
