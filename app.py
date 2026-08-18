@@ -8,12 +8,14 @@ following yang tidak di-follow-back (diff by pk).
 """
 
 import json
-from urllib.error import HTTPError
-from urllib.parse import unquote, urlencode
+import re
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote, urlencode, urlsplit
+from urllib.request import Request as UrlRequest
 
-from flask import Flask, Response, render_template, request, stream_with_context
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
-from scrape_followers import fetch, fetch_all, fetch_iter
+from scrape_followers import CTX, PA_PROXY, fetch, fetch_all, fetch_iter, make_openers
 
 app = Flask(__name__)
 
@@ -105,6 +107,80 @@ def index():
         result=result,
         target_profile=target_profile
     )
+
+
+@app.route("/api/ig/<path:api_path>", methods=["GET"])
+def ig_proxy(api_path):
+    """Proxy passthrough ke IG — request per-halaman terlihat di Network tab.
+    Sessionid dikirim browser sebagai header x-sessionid (same-origin, aman)."""
+    sessionid = request.headers.get("x-sessionid", "").strip()
+    if not sessionid:
+        return jsonify({"message": "header x-sessionid wajib"}), 400
+    cookies = build_cookies(sessionid)
+
+    if api_path == "users/web_profile_info":
+        username = request.args.get("username", "").strip()
+        if not username:
+            return jsonify({"message": "query username wajib"}), 400
+        url = "https://www.instagram.com/api/v1/users/web_profile_info/?" + urlencode({"username": username})
+    else:
+        m = re.fullmatch(r"friendships/(\d+)/(followers|following)", api_path)
+        if not m:
+            return jsonify({"message": "path tidak diizinkan"}), 400
+        uid, which = m.groups()
+        try:
+            count = int(request.args.get("count", "50"))
+        except ValueError:
+            return jsonify({"message": "count harus angka"}), 400
+        params = {"count": count}
+        if which == "followers":
+            params["search_surface"] = "follow_list_page"
+        max_id = request.args.get("max_id", "").strip()
+        if max_id:
+            params["max_id"] = max_id
+        url = f"https://www.instagram.com/api/v1/friendships/{uid}/{which}/?" + urlencode(params)
+
+    try:
+        data = fetch(cookies, url)
+    except HTTPError as exc:
+        return jsonify({"message": f"HTTP {exc.code}", "httpStatus": exc.code}), 502
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 502
+    return jsonify(data)
+
+
+ALLOWED_IMG_HOSTS = ("cdninstagram.com", "fbcdn.net")
+
+
+@app.route("/api/ig/img")
+def ig_img():
+    """Proxy gambar profil: CDN IG diblokir client-side (adblock/CORS) dari halaman
+    asing. Ambil server-side (tanpa referer — CDN terbukti melayani 200) lalu
+    kembalikan bytes; browser melihat request ke domain sendiri, tidak diblokir."""
+    raw = request.args.get("url", "").strip()
+    if not raw:
+        return jsonify({"message": "query url wajib"}), 400
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return jsonify({"message": "URL tidak valid"}), 400
+    host = (parts.hostname or "").lower()
+    if (
+        parts.scheme != "https"
+        or not any(host == h or host.endswith("." + h) for h in ALLOWED_IMG_HOSTS)
+    ):
+        return jsonify({"message": "URL gambar tidak diizinkan"}), 400
+
+    last_err = None
+    for opener in make_openers():
+        try:
+            with opener.open(UrlRequest(raw, headers={"user-agent": "Mozilla/5.0"}), timeout=30) as resp:
+                data = resp.read()
+                ctype = resp.headers.get("Content-Type", "image/jpeg")
+                return Response(data, mimetype=ctype, headers={"Cache-Control": "public, max-age=86400"})
+        except (HTTPError, URLError) as exc:
+            last_err = exc
+    return jsonify({"message": str(last_err)}), 502
 
 
 @app.route("/api/scan", methods=["POST", "GET"])

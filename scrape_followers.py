@@ -46,6 +46,14 @@ CTX = ssl.create_default_context(cafile=certifi.where())
 PA_PROXY = "http://proxy.server:3128"
 
 
+def make_openers():
+    """Dua rute: env proxy/direct dulu, lalu fallback proxy PA."""
+    return [
+        build_opener(ProxyHandler(getproxies()), HTTPSHandler(context=CTX)),
+        build_opener(ProxyHandler({"http": PA_PROXY, "https": PA_PROXY}), HTTPSHandler(context=CTX)),
+    ]
+
+
 def _open_once(opener, url, headers, timeout=30):
     with opener.open(UrlRequest(url, headers=headers), timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -62,10 +70,7 @@ def fetch(cookies: dict, url: str, retries: int = 4) -> dict:
         "x-ig-app-id": IG_APP_ID,
         "x-requested-with": "XMLHttpRequest",
     }
-    openers = [
-        build_opener(ProxyHandler(getproxies()), HTTPSHandler(context=CTX)),
-        build_opener(ProxyHandler({"http": PA_PROXY, "https": PA_PROXY}), HTTPSHandler(context=CTX)),
-    ]
+    openers = make_openers()
 
     def attempt_routes():
         last_err = None

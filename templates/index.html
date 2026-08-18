@@ -1304,9 +1304,9 @@
         <div class="target-profile-card">
           <div class="target-info">
             <div class="target-avatar-ring">
-              <img 
-                src="{{ target_profile.profile_pic_url }}" 
-                alt="{{ target_profile.username }}" 
+              <img
+                src="/api/ig/img?url={{ target_profile.profile_pic_url | urlencode }}"
+                alt="{{ target_profile.username }}"
                 class="target-avatar"
                 referrerpolicy="no-referrer"
                 onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
@@ -1488,9 +1488,9 @@
               <div class="user-card" data-username="{{ u.username|lower }}" data-fullname="{{ (u.full_name or '')|lower }}">
                 <div class="user-left">
                   <div class="user-avatar-wrap">
-                    <img 
-                      src="{{ u.profile_pic_url }}" 
-                      alt="{{ u.username }}" 
+                    <img
+                      src="/api/ig/img?url={{ u.profile_pic_url | urlencode }}"
+                      alt="{{ u.username }}"
                       class="user-avatar"
                       referrerpolicy="no-referrer"
                       onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
@@ -1695,44 +1695,95 @@
       let totalFollowersTarget = 0;
 
       try {
-        const formData = new FormData();
-        formData.append('sessionid', sessionid);
-        formData.append('username', username);
+        const headers = { 'x-sessionid': sessionid };
 
-        const response = await fetch('/api/scan', {
-          method: 'POST',
-          body: formData
+        // 1. Resolusi username -> user_id (terlihat di Network sebagai /api/ig/...)
+        const profResp = await fetch(`/api/ig/users/web_profile_info?username=${encodeURIComponent(username)}`, { headers });
+        const profData = await profResp.json();
+        if (!profResp.ok) throw new Error(profData.message || `HTTP ${profResp.status}`);
+        const user = profData.data && profData.data.user;
+        if (!user || !user.id) throw new Error('Username tidak ditemukan');
+        const uid = user.id;
+        const targetProfile = {
+          id: user.id,
+          username: user.username || username,
+          full_name: user.full_name || '',
+          profile_pic_url: user.profile_pic_url || '',
+          is_private: user.is_private || false,
+          is_verified: user.is_verified || false,
+          follower_count: (user.edge_followed_by && user.edge_followed_by.count) || user.follower_count || 0,
+          following_count: (user.edge_follow && user.edge_follow.count) || user.following_count || 0,
+        };
+        estFollowing = targetProfile.following_count;
+        estFollowers = targetProfile.follower_count;
+        handleStreamEvent({
+          type: 'profile_found', target_profile: targetProfile,
+          total_following: estFollowing, total_followers: estFollowers,
+          message: `Akun @${targetProfile.username} ditemukan!`
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP Error ${response.status}: ${response.statusText}`);
-        }
+        // 2. Ambil following — satu request per halaman (Network tab)
+        const following = [];
+        let maxId = null;
+        let page = 0;
+        do {
+          page++;
+          let u = `/api/ig/friendships/${uid}/following?count=200`;
+          if (maxId) u += `&max_id=${encodeURIComponent(maxId)}`;
+          const r = await fetch(u, { headers });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.message || `HTTP ${r.status}`);
+          const chunk = d.users || [];
+          following.push(...chunk);
+          handleStreamEvent({
+            type: 'progress', phase: 'following', page,
+            current_following: following.length, current_followers: 0,
+            total_following: estFollowing, total_followers: estFollowers,
+            message: `Following: Halaman ${page} (+${chunk.length}, total ${following.length})`
+          });
+          maxId = d.next_max_id;
+          await delay(400);
+        } while (maxId);
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
+        // 3. Ambil followers — satu request per halaman
+        const followers = [];
+        maxId = null;
+        page = 0;
+        do {
+          page++;
+          let u = `/api/ig/friendships/${uid}/followers?count=50&search_surface=follow_list_page`;
+          if (maxId) u += `&max_id=${encodeURIComponent(maxId)}`;
+          const r = await fetch(u, { headers });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.message || `HTTP ${r.status}`);
+          const chunk = d.users || [];
+          followers.push(...chunk);
+          handleStreamEvent({
+            type: 'progress', phase: 'followers', page,
+            current_following: following.length, current_followers: followers.length,
+            total_following: estFollowing, total_followers: estFollowers,
+            message: `Followers: Halaman ${page} (+${chunk.length}, total ${followers.length})`
+          });
+          maxId = d.next_max_id;
+          await delay(400);
+        } while (maxId);
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop(); // Keep partial line in buffer
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('data: ')) {
-              const jsonStr = trimmed.slice(6);
-              try {
-                const event = JSON.parse(jsonStr);
-                handleStreamEvent(event);
-              } catch (err) {
-                console.error('Failed to parse SSE JSON:', err, jsonStr);
-              }
-            }
-          }
-        }
+        // 4. Hitung perbandingan di client
+        handleStreamEvent({ type: 'status', step: 'calculating', message: 'Menghitung perbandingan Unfollowers, Fans, dan Mutuals...' });
+        const pk = (u) => String(u.pk ?? u.id);
+        const fpk = new Set(followers.map(pk));
+        const gpk = new Set(following.map(pk));
+        const result = {
+          unfollowers: following.filter((u) => !fpk.has(pk(u))),
+          fans: followers.filter((u) => !gpk.has(pk(u))),
+          mutuals: following.filter((u) => fpk.has(pk(u))),
+          following,
+          followers,
+        };
+        handleStreamEvent({
+          type: 'complete', result, target_profile: targetProfile,
+          message: `Selesai! Ditemukan ${result.unfollowers.length} unfollowers, ${result.fans.length} fans, ${result.mutuals.length} mutuals.`
+        });
 
       } catch (err) {
         showError(err.message || 'Gagal terhubung ke server.');
@@ -1753,6 +1804,7 @@
 
     let estFollowing = 0;
     let estFollowers = 0;
+    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
     function handleStreamEvent(event) {
       const progressSection = document.getElementById('progressSection');
@@ -1862,9 +1914,9 @@
           <div class="target-profile-card">
             <div class="target-info">
               <div class="target-avatar-ring">
-                <img 
-                  src="${escapeHtml(target.profile_pic_url || '')}" 
-                  alt="${escapeHtml(target.username)}" 
+                <img
+                  src="/api/ig/img?url=${encodeURIComponent(target.profile_pic_url || '')}"
+                  alt="${escapeHtml(target.username)}"
                   class="target-avatar"
                   referrerpolicy="no-referrer"
                   onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
@@ -1938,9 +1990,9 @@
             <div class="user-card" data-username="${escapeHtml((u.username || '').toLowerCase())}" data-fullname="${escapeHtml((u.full_name || '').toLowerCase())}">
               <div class="user-left">
                 <div class="user-avatar-wrap">
-                  <img 
-                    src="${escapeHtml(u.profile_pic_url || '')}" 
-                    alt="${escapeHtml(u.username || '')}" 
+                  <img
+                    src="/api/ig/img?url=${encodeURIComponent(u.profile_pic_url || '')}"
+                    alt="${escapeHtml(u.username || '')}"
                     class="user-avatar"
                     referrerpolicy="no-referrer"
                     onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
