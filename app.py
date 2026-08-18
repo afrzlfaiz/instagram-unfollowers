@@ -9,15 +9,27 @@ following yang tidak di-follow-back (diff by pk).
 
 import json
 import re
+import traceback
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlencode, urlsplit
 from urllib.request import Request as UrlRequest
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from werkzeug.exceptions import HTTPException
 
 from scrape_followers import CTX, PA_PROXY, fetch, fetch_all, fetch_iter, make_openers
 
 app = Flask(__name__)
+
+
+@app.errorhandler(Exception)
+def on_unhandled(exc):
+    """Semua error tak terduga: print ke log (terlihat di dashboard Render)
+    dan balas JSON berisi pesannya, bukan halaman 500 kosong."""
+    if isinstance(exc, HTTPException):
+        return exc
+    traceback.print_exc()
+    return jsonify({"message": str(exc)}), 500
 
 
 def resolve_user_info(cookies: dict, username: str) -> tuple[str, dict]:
@@ -178,7 +190,7 @@ def ig_img():
                 data = resp.read()
                 ctype = resp.headers.get("Content-Type", "image/jpeg")
                 return Response(data, mimetype=ctype, headers={"Cache-Control": "public, max-age=86400"})
-        except (HTTPError, URLError) as exc:
+        except (HTTPError, URLError, OSError) as exc:
             last_err = exc
     return jsonify({"message": str(last_err)}), 502
 

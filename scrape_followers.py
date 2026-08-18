@@ -18,7 +18,7 @@ import socket
 import ssl
 import sys
 import time
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import (
     HTTPSHandler,
@@ -95,9 +95,9 @@ def fetch(cookies: dict, url: str, retries: int = 4) -> dict:
                 if exc.code not in (429, 500, 502, 503):
                     return None, exc  # auth/logic error — semua rute sama
                 # 429/5xx: IP egress ini kena rate limit — coba rute lain dulu
-            except URLError as exc:
+            except OSError as exc:
                 if not isinstance(last_err, HTTPError):
-                    last_err = exc  # jaringan menolak — coba rute berikutnya
+                    last_err = exc  # jaringan menolak/reset/timeout — coba rute lain
         return None, last_err
 
     for attempt in range(retries):
