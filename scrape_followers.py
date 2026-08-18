@@ -14,6 +14,7 @@ Contoh:
 import argparse
 import json
 import os
+import socket
 import ssl
 import sys
 import time
@@ -46,12 +47,24 @@ CTX = ssl.create_default_context(cafile=certifi.where())
 PA_PROXY = "http://proxy.server:3128"
 
 
+def _pa_proxy_route():
+    """Route proxy PA hanya berguna di dalam jaringan PythonAnywhere —
+    hostname 'proxy.server' tidak resolve di luar (Render, mac, dll). Cek
+    sekali agar di luar PA tidak ada rute mati yang menimpa error asli."""
+    try:
+        socket.getaddrinfo("proxy.server", 3128)
+    except socket.gaierror:
+        return None
+    return {"http": PA_PROXY, "https": PA_PROXY}
+
+
 def make_openers():
-    """Dua rute: env proxy/direct dulu, lalu fallback proxy PA."""
-    return [
-        build_opener(ProxyHandler(getproxies()), HTTPSHandler(context=CTX)),
-        build_opener(ProxyHandler({"http": PA_PROXY, "https": PA_PROXY}), HTTPSHandler(context=CTX)),
-    ]
+    """Rute env proxy/direct dulu; + fallback proxy PA hanya kalau resolve."""
+    routes = [build_opener(ProxyHandler(getproxies()), HTTPSHandler(context=CTX))]
+    pa = _pa_proxy_route()
+    if pa:
+        routes.append(build_opener(ProxyHandler(pa), HTTPSHandler(context=CTX)))
+    return routes
 
 
 def _open_once(opener, url, headers, timeout=30):
@@ -83,7 +96,8 @@ def fetch(cookies: dict, url: str, retries: int = 4) -> dict:
                     return None, exc  # auth/logic error — semua rute sama
                 # 429/5xx: IP egress ini kena rate limit — coba rute lain dulu
             except URLError as exc:
-                last_err = exc  # network unreachable — coba rute berikutnya
+                if not isinstance(last_err, HTTPError):
+                    last_err = exc  # jaringan menolak — coba rute berikutnya
         return None, last_err
 
     for attempt in range(retries):
