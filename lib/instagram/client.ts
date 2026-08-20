@@ -61,6 +61,9 @@ export async function fetchInstagramJson(
     cookie: cookieHeader(cookies),
     "x-ig-app-id": IG_APP_ID,
     "x-requested-with": "XMLHttpRequest",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
   };
 
   for (let attempt = 0; attempt < retries; attempt += 1) {
@@ -88,6 +91,26 @@ export async function fetchInstagramJson(
     }
   }
   throw new Error("Instagram tidak dapat dihubungi");
+}
+
+export async function fetchInstagramProfileJson(
+  cookies: Record<string, string>,
+  url: string,
+  options: FetchOptions = {},
+): Promise<unknown> {
+  try {
+    return await fetchInstagramJson(cookies, url, options);
+  } catch (error) {
+    if (!(error instanceof InstagramHttpError) || error.status !== 400 || !Object.keys(cookies).length) {
+      throw error;
+    }
+
+    try {
+      return await fetchInstagramJson({}, url, options);
+    } catch {
+      throw error;
+    }
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

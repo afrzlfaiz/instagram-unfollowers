@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
   fetchInstagramJson,
+  fetchInstagramProfileJson,
   InstagramHttpError,
 } from "../../../lib/instagram/client";
 import {
@@ -52,16 +53,19 @@ async function proxyInstagramJson(
   req: NextApiRequest,
   res: NextApiResponse,
   url: string,
+  profileFallback = false,
 ) {
   const cookies = getCookies(req, res);
   if (!cookies) return;
   try {
-    const data = await fetchInstagramJson(cookies, url);
+    const fetcher = profileFallback ? fetchInstagramProfileJson : fetchInstagramJson;
+    const data = await fetcher(cookies, url);
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json(data);
   } catch (error) {
     if (error instanceof InstagramHttpError) {
-      return jsonErrorWithStatus(res, 502, `HTTP ${error.status}`, error.status);
+      const status = error.status >= 400 && error.status < 500 ? error.status : 502;
+      return jsonErrorWithStatus(res, status, `HTTP ${error.status}`, error.status);
     }
     return jsonError(res, 502, "Instagram tidak dapat dihubungi. Coba lagi.");
   }
@@ -87,7 +91,7 @@ async function handleProfile(req: NextApiRequest, res: NextApiResponse) {
   const url =
     "https://www.instagram.com/api/v1/users/web_profile_info/?" +
     new URLSearchParams({ username }).toString();
-  return proxyInstagramJson(req, res, url);
+  return proxyInstagramJson(req, res, url, true);
 }
 
 async function handleFriendship(

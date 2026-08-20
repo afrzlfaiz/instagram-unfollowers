@@ -4,7 +4,12 @@ import { test } from "node:test";
 import apiHandler from "../pages/api/ig/[...path]";
 import healthHandler from "../pages/api/healthz";
 import { getServerSideProps } from "../pages/index";
-import { fetchInstagramJson, fetchIter, InstagramHttpError } from "../lib/instagram/client";
+import {
+  fetchInstagramJson,
+  fetchInstagramProfileJson,
+  fetchIter,
+  InstagramHttpError,
+} from "../lib/instagram/client";
 import { compareUserLists } from "../lib/instagram/relationships";
 import {
   buildCookies,
@@ -72,15 +77,20 @@ test("relationship comparison preserves categories and order", () => {
 
 test("Instagram client retries transient HTTP errors", async () => {
   let calls = 0;
+  let requestHeaders: Headers | undefined;
   const data = await fetchInstagramJson({}, "https://example.test", {
-    fetchImpl: async () => {
+    fetchImpl: async (_input, init) => {
       calls += 1;
+      requestHeaders = new Headers(init?.headers);
       return calls === 1 ? response(503, { error: "busy" }) : response(200, { ok: true });
     },
     sleep: async () => undefined,
   });
   assert.deepEqual(data, { ok: true });
   assert.equal(calls, 2);
+  assert.equal(requestHeaders?.get("sec-fetch-dest"), "empty");
+  assert.equal(requestHeaders?.get("sec-fetch-mode"), "cors");
+  assert.equal(requestHeaders?.get("sec-fetch-site"), "same-origin");
 });
 
 test("Instagram client exposes final HTTP errors", async () => {
@@ -91,6 +101,27 @@ test("Instagram client exposes final HTTP errors", async () => {
     }),
     (error: unknown) => error instanceof InstagramHttpError && error.status === 400,
   );
+});
+
+test("profile client retries without cookies after Instagram profile HTTP 400", async () => {
+  let calls = 0;
+  const cookieHeaders: Array<string | null> = [];
+  const data = await fetchInstagramProfileJson(
+    { sessionid: "123:secret", ds_user_id: "123" },
+    "https://www.instagram.com/api/v1/users/web_profile_info/?username=target",
+    {
+      retries: 1,
+      fetchImpl: async (_input, init) => {
+        calls += 1;
+        cookieHeaders.push(new Headers(init?.headers).get("cookie"));
+        return calls === 1
+          ? response(400, { message: "profile endpoint rejected session" })
+          : response(200, { data: { user: { id: "9", username: "target" } } });
+      },
+    },
+  );
+  assert.deepEqual(data, { data: { user: { id: "9", username: "target" } } });
+  assert.deepEqual(cookieHeaders, ["sessionid=123:secret; ds_user_id=123", ""]);
 });
 
 test("pagination deduplicates users and stops at the end", async () => {
