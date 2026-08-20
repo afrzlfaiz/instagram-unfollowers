@@ -1,8 +1,7 @@
-__pycache__/
-*.pyc
-.venv/
-venv/
 .DS_Store
+.env*
+!.env.example
+.netlify/
 node_modules/
 .next/
 out/

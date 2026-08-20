@@ -48,7 +48,7 @@ Options:
 
 ## Endpoint
 
-- `GET /healthz` — health check Render;
+- `GET /healthz` — health check deployment;
 - `GET /api/ig/users/web_profile_info?username=...`;
 - `GET /api/ig/friendships/<id>/followers?...`;
 - `GET /api/ig/friendships/<id>/following?...`;
@@ -61,7 +61,6 @@ cookie tersebut. Gunakan hanya pada instance lokal atau server yang Anda kendali
 
 ```bash
 npm test
-python3 -m unittest discover -p 'test_*.py'  # rollback compatibility check
 ```
 
 ## Deploy ke Render
@@ -73,6 +72,4 @@ python3 -m unittest discover -p 'test_*.py'  # rollback compatibility check
 - start: `npm start`;
 - health check: `/healthz`.
 
-Buat service baru untuk cutover, verifikasi endpoint dan satu analisis nyata,
-lalu pindahkan domain/traffic. Service Python lama dan artifacts Python sengaja
-dipertahankan sampai cutover selesai agar rollback tetap tersedia.
+Verifikasi endpoint dan satu analisis nyata sebelum memindahkan domain/traffic.
