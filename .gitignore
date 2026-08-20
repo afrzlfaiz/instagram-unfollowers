@@ -3,5 +3,9 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+node_modules/
+.next/
+out/
+*.tsbuildinfo
 followers_*.json
 following_*.json

@@ -1,7 +1,8 @@
 services:
   - type: web
-    name: instagram-unfollowers
-    runtime: python
+    name: instagram-unfollowers-next
+    runtime: node
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 60
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
